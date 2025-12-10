@@ -16,7 +16,7 @@ SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL", "")
 # HELPERS
 # -------------------------------------------------------------------
 def safe_int(value, default=0):
-    """Convert to int if numeric, else return default."""
+    """Convert to int if numeric, else return default (handles 'Neutral', NaN, etc.)."""
     try:
         f = float(str(value).strip())
         return int(f)
@@ -28,6 +28,7 @@ def load_dataframe():
     mode = DATA_MODE.upper()
     try:
         if mode == "STATIC":
+            # Static sample rows for testing
             data = [
                 {"CE_Zone": 22450, "PE_Zone": 22150, "Bias": "Neutral"},
                 {"CE_Zone": 22520, "PE_Zone": 22240, "Bias": "Bullish"},
@@ -73,13 +74,15 @@ def zones_json():
         return jsonify({"ok": False, "error": err}), 500
 
     df = normalize_dataframe(df)
+
     zones = []
     for _, row in df.iterrows():
         zones.append({
-            "ce": safe_int(row.get("CE_Zone")),
+            "ce": safe_int(row.get("CE_Zone")),   # converts safely
             "pe": safe_int(row.get("PE_Zone")),
-            "bias": str(row.get("Bias")) if pd.notna(row.get("Bias")) else "Neutral",
+            "bias": str(row.get("Bias")) if pd.notna(row.get("Bias")) else "Neutral"
         })
+
     return jsonify({"ok": True, "count": len(zones), "zones": zones})
 
 @app.route("/zones/raw")
