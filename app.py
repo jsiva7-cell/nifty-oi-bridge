@@ -1,57 +1,92 @@
-import io
-import time
-import requests
+from flask import Flask, jsonify
 import pandas as pd
-from flask import Flask, jsonify, Response
+import os
 
 app = Flask(__name__)
 
-# Your Google Sheet CSV export URL (tab gid=0 by default)
-CSV_URL = "https://docs.google.com/spreadsheets/d/1gGfhOgQNKp6dTcps_uGOL2R2aCYewjKSlVyy8jkSulQ/export?format=csv&id=1gGfhOgQNKp6dTcps_uGOL2R2aCYewjKSlVyy8jkSulQ&gid=0"
+# -------------------------------------------------------------------
+# CONFIGURATION
+# -------------------------------------------------------------------
+# Choose how to load data: STATIC (default), CSV, or SHEETS
+DATA_MODE = os.getenv("DATA_MODE", "STATIC")  # STATIC | CSV | SHEETS
+CSV_PATH = os.getenv("CSV_PATH", "zones.csv")
+SHEETS_CSV_URL = os.getenv("SHEETS_CSV_URL", "")
 
-def fetch_df():
-    r = requests.get(CSV_URL, timeout=10)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.text))
+# -------------------------------------------------------------------
+# HELPERS
+# -------------------------------------------------------------------
+def safe_int(value, default=0):
+    """Convert to int if numeric, else return default."""
+    try:
+        f = float(str(value).strip())
+        return int(f)
+    except (ValueError, TypeError):
+        return default
 
+def load_dataframe():
+    """Load data based on DATA_MODE."""
+    mode = DATA_MODE.upper()
+    try:
+        if mode == "STATIC":
+            data = [
+                {"CE_Zone": 22450, "PE_Zone": 22150, "Bias": "Neutral"},
+                {"CE_Zone": 22520, "PE_Zone": 22240, "Bias": "Bullish"},
+                {"CE_Zone": "Neutral", "PE_Zone": 22080, "Bias": "Bearish"},
+            ]
+            return pd.DataFrame(data), None
+
+        if mode == "CSV":
+            if not os.path.exists(CSV_PATH):
+                return None, f"CSV not found at {CSV_PATH}"
+            return pd.read_csv(CSV_PATH), None
+
+        if mode == "SHEETS":
+            if not SHEETS_CSV_URL:
+                return None, "SHEETS_CSV_URL not set"
+            return pd.read_csv(SHEETS_CSV_URL), None
+
+        return None, f"Unknown DATA_MODE={DATA_MODE}"
+    except Exception as e:
+        return None, f"Load error: {str(e)}"
+
+def normalize_dataframe(df):
+    """Ensure required columns exist."""
+    if "CE_Zone" not in df.columns:
+        df["CE_Zone"] = 0
+    if "PE_Zone" not in df.columns:
+        df["PE_Zone"] = 0
+    if "Bias" not in df.columns:
+        df["Bias"] = "Neutral"
+    return df
+
+# -------------------------------------------------------------------
+# ROUTES
+# -------------------------------------------------------------------
 @app.route("/")
-def root():
-    return jsonify({"ok": True, "endpoints": ["/zones", "/zones/raw"]})
+def home():
+    return jsonify({"ok": True, "endpoints": ["/zones", "/zones/raw"], "mode": DATA_MODE})
 
 @app.route("/zones")
 def zones_json():
-    # Returns a compact JSON payload with zones keyed by strike
-    df = fetch_df()
-    # Expect headers: strikePrice, CE.openInterest, PE.openInterest, CE_Zone, PE_Zone
-    cols = ["strikePrice", "CE_Zone", "PE_Zone"]
-    for c in cols:
-        if c not in df.columns:
-            return jsonify({"ok": False, "error": f"Missing column: {c}", "columns": df.columns.tolist()}), 400
+    df, err = load_dataframe()
+    if err:
+        return jsonify({"ok": False, "error": err}), 500
 
-    df = df[cols].copy()
-    # Build {strike: {ce: int, pe: int}}
-    data = {
-        str(row["strikePrice"]): {
-            "ce": int(row["CE_Zone"]) if pd.notna(row["CE_Zone"]) else 0,
-            "pe": int(row["PE_Zone"]) if pd.notna(row["PE_Zone"]) else 0,
-        }
-        for _, row in df.iterrows()
-    }
-    return jsonify({
-        "ok": True,
-        "timestamp": int(time.time()),
-        "count": len(df),
-        "zones": data
-    })
+    df = normalize_dataframe(df)
+    zones = []
+    for _, row in df.iterrows():
+        zones.append({
+            "ce": safe_int(row.get("CE_Zone")),
+            "pe": safe_int(row.get("PE_Zone")),
+            "bias": str(row.get("Bias")) if pd.notna(row.get("Bias")) else "Neutral",
+        })
+    return jsonify({"ok": True, "count": len(zones), "zones": zones})
 
 @app.route("/zones/raw")
-def zones_raw_text():
-    # Returns a simple newline text of CE_Zone values (one per row)
-    df = fetch_df()
-    if "CE_Zone" not in df.columns:
-        return Response("ERROR: Missing CE_Zone column", mimetype="text/plain", status=400)
-    values = df["CE_Zone"].fillna(0).astype(int).tolist()
-    return Response("\n".join(map(str, values)), mimetype="text/plain")
+def zones_raw():
+    df, err = load_dataframe()
+    if err:
+        return jsonify({"ok": False, "error": err}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    df = normalize_dataframe(df)
+    return jsonify({"ok": True, "columns": df.columns.tolist(), "rows": df.to_dict(orient="records")})
